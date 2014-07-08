@@ -1,0 +1,16 @@
+*.iml
+/target
+/pom.xml
+/pom.xml.asc
+*.idea
+\#*\#
+*.jar
+*.class
+/.lein-*
+/.nrepl-port
+*~
+.classpath
+.project
+.settings
+.lein-repl-history
+.nrepl-port
