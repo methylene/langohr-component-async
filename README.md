@@ -5,6 +5,7 @@ A version of the [langohr getting started example](http://clojurerabbitmq.info/a
 
 How to run it:
 
+* make sure rabbitmq server is running and reachable at a location configured in `conf/q.clj`
 * Start a repl with `lein repl`
 * open test/user.clj in emacs
 * emacs needs cider installed
