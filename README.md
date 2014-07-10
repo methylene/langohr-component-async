@@ -1,7 +1,7 @@
 langohr-component-async
 =======================
 
-A version of the langohr basic example that uses async channels and stuartsierra's component.
+A version of the (langohr getting started example)[http://clojurerabbitmq.info/articles/getting_started.html] that uses async channels and stuartsierra's component.
 
 How to run it:
 
