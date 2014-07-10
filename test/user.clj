@@ -1,47 +1,43 @@
 (ns user
-  (:require [langohr.core      :as rmq]
+  (:refer-clojure :exclude [read-string])
+  (:require [clojure.edn       :refer [read-string]]
+            [langohr.core      :as rmq]
             [langohr.channel   :as lch]
             [langohr.queue     :as lq]
             [langohr.consumers :as lc]
             [langohr.basic     :as lb]
             [com.stuartsierra.component :as component]
+            [clojure.java.io :refer [file]]
             [clojure.pprint :refer [pprint]]
-            [clojure.core.async :refer [chan put! <! <!! go close!]]))
+            [clojure.core.async :refer [chan put! <! <!! go close!]])
+  (:import [com.stuartsierra.component Lifecycle]))
 
 (def default-exchange-name "")
 (def qname "langohr.examples.hello-world")
-
-(defn r-chan [langohr-conn]
-  (let [rch (lch/open (:langohr-conn langohr-conn))]
-    (lq/declare rch qname :exclusive false :auto-delete true)
-    rch))
+(declare system)
 
 (defn take-chan [langohr-chan]
-  (let [ch (chan 1)
-        rch (:langohr-chan langohr-chan)]
-    (assert rch)
-    (lq/declare rch qname :exclusive false :auto-delete true)
-    (lc/subscribe rch qname
+  (let [ch (chan 1)]
+    (lc/subscribe (:langohr-chan langohr-chan) qname
                   (fn [_ {:keys [content-type delivery-tag type] :as meta} ^bytes payload]
                     (put! ch (String. payload "UTF-8"))) :auto-ack true)
     ch))
 
 (defn put-chan [langohr-chan]
-  (let [ch (chan 1)
-        rch (:langohr-chan langohr-chan)]
-    (assert rch)
-    (lq/declare rch qname :exclusive false :auto-delete true)
+  (let [ch (chan 1)]
     (go (loop []
           (let [msg (<! ch)]
             (when-not (nil? msg)
-              (lb/publish rch default-exchange-name qname msg :content-type "text/plain" :type "greetings.hi")
+              (lb/publish (:langohr-chan langohr-chan)
+                          default-exchange-name qname msg
+                          :content-type "text/plain" :type "greetings.hi")
               (recur)))))
     ch))
 
-(defrecord LangohrConn []
+(defrecord LangohrConn [config]
   component/Lifecycle
   (start [this]
-    (assoc this :langohr-conn (rmq/connect)))
+    (assoc this :langohr-conn (rmq/connect config)))
   (stop [this]
     (rmq/close (:langohr-conn this))
     (assoc this :langohr-conn nil)))
@@ -49,49 +45,76 @@
 (defrecord LangohrChan [langohr-conn]
   component/Lifecycle
   (start [this]
-    (assoc this :langohr-chan (r-chan langohr-conn)))
+    (assoc this :langohr-chan
+           (let [rch (lch/open (:langohr-conn langohr-conn))]
+             (lq/declare rch qname :exclusive false :auto-delete true)
+             rch)))
   (stop [this]
     (rmq/close (:langohr-chan this))
     (assoc this
       :langohr-chan nil
       :langohr-conn nil)))
 
-(defrecord AsyncChannels [langohr-chan]
+
+(defrecord LangohrSubscribedChan [langohr-chan]
   component/Lifecycle
   (start [this]
-    (assoc this
-      :take-chan (take-chan langohr-chan)
-      :put-chan (put-chan langohr-chan)))
+    (assoc this :langohr-subscribed-chan
+           (take-chan langohr-chan)))
   (stop [this]
-    (close! (:take-chan this))
-    (close! (:put-chan this))
+    (close! (:langohr-subscribed-chan this))
     (assoc this
       :langohr-chan nil
-      :take-chan nil
-      :put-chan nil)))
+      :langohr-subscribed-chan nil)))
 
-(defn q-system []
+(defn langohr-system [config]
   (component/system-map
-   :langohr-conn (map->LangohrConn {})
+   :langohr-conn (map->LangohrConn
+                  {:config (merge rmq/*default-config* config)})
    :langohr-chan (component/using
                   (map->LangohrChan {})
                   [:langohr-conn])
-   :async-channels (component/using
-                    (map->AsyncChannels {})
-                    [:langohr-chan])))
+   :langohr-subscribed-chan (component/using
+                             (map->LangohrSubscribedChan {})
+                             [:langohr-chan])))
 
-(def system (q-system))
 
-(defn start [] (alter-var-root #'system component/start))
-(defn stop [] (alter-var-root #'system component/stop))
 
-(defn putc [] (get-in system [:async-channels :put-chan]))
-(defn takec [] (get-in system [:async-channels :take-chan]))
+(defn start-langohr
+  "connect to rabbitmq"
+  []
+  (let [conf "conf/q.clj"]
+    (assert (.exists (file conf)) (str "configuration file not found: " conf))
+    (def system nil)
+    (alter-var-root #'system (constantly (langohr-system (read-string (slurp conf)))))
+    (alter-var-root #'system component/start)))
 
+(defn stop-langohr
+  "disconnect from rabbitmq: close connection, cleanup"
+  [] (alter-var-root #'system component/stop))
+
+(defn start-listening
+  "start listening to messages from rabbitmq, and print each on stdout
+   must be called after start-langohr"
+  []
+  (go (loop []
+        (let [msg (<! (get-in system [:langohr-subscribed-chan :langohr-subscribed-chan]))]
+          (when-not (nil? msg)
+            (println "Got msg:" msg)
+            (flush)
+            (recur))))))
+
+(defn send-message [msg]
+  (let [ch (put-chan (:langohr-chan system))]
+    (put! ch msg (fn [_] (close! ch)))))
 
 (defn run-example
-  "call after (start)"
+  "call (start-langohr) and (start-listening) before this.
+   after that, you may call (run-example) or (send-message) any number of times.
+   call (stop-langohr) to cleanup the used resources."
   []
-  (go (println "Got msg: " (<! (takec))))
-  (put! (putc) "Hello!"))
-
+  (send-message "Hello!")
+  (Thread/sleep 500)
+  (send-message "This is a message.")
+  (Thread/sleep 500)
+  (send-message "Goodbye."))

@@ -1,0 +1,4 @@
+{:host "localhost"
+ :username "guest"
+ :password "guest"
+ :port 5672}
